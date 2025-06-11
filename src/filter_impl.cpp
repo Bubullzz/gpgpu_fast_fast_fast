@@ -207,7 +207,7 @@ void dilate(const uint8_t* buffer, uint8_t* output, int size, int width, int hei
 
 // Hysteresis seems to be applied for colored images, after dilation and erosion,
 // To be checked
-// Output must be a binary image according to doc
+// https://developer.imageviz.com/refmans/latest/ImageDev/html/Processing_ImageSegmentation_Binarization_HysteresisThresholding.html
 void hysteresis(const uint8_t* input, uint8_t* output, int width, int height, int stride, uint8_t low_threshold,
                 uint8_t high_threshold) {
     for (int y = 0; y < height; ++y) {
@@ -229,6 +229,8 @@ void hysteresis(const uint8_t* input, uint8_t* output, int width, int height, in
                 L’entrée contient tous les
                 éléments supérieurs au seuil bas
                 */
+
+                // 4-connectivity / 8-connectivity neighbors ??????
             }
         }
     }
@@ -259,7 +261,7 @@ void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_s
     // New buffer / change how we handle buffers (TODO / SAVE ORIGIN BUFFER AND CREATE NEW MASK /// memcpy??)
     // Greyscale or binarize buffer (for erosion and dilation)
     // Erode and dilate BW BUFFER (MOSTLY DONE, BINARY ONLY SUPPORTED FOR NOW)
-    // Hysteresis (TO COMPLETE / CHECK) // Seems that input is colored and output is binary
+    // Hysteresis (TO COMPLETE / CHECK) // Seems that input is colored/grey and output is binary
     // Use BW buffer to mask
 }
 }
