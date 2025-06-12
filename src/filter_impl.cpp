@@ -1,7 +1,16 @@
 #include "filter_impl.h"
 
 #include "logo.h"
+
 #include <cmath>
+#include <cstring>
+
+
+// Hardcoded parameters
+
+constexpr float MATCH = 25.0f;
+constexpr int FRAME_CANDIDATE = 30;
+
 
 struct rgb {
     uint8_t r, g, b;
@@ -17,6 +26,7 @@ struct xyz {
 
 struct states {
     lab background;
+    rgb rgb_background;
     lab candidate;
     int last_match = -1;
 };
@@ -62,14 +72,15 @@ constexpr float inverse_srgb_lut[256] = {
     0.75294222f, 0.76052450f, 0.76815115f, 0.77582222f, 0.78353779f, 0.79129794f, 0.79910274f, 0.80695226f, 0.81484657f,
     0.82278575f, 0.83076988f, 0.83879901f, 0.84687323f, 0.85499261f, 0.86315721f, 0.87136712f, 0.87962240f, 0.88792312f,
     0.89626935f, 0.90466117f, 0.91309865f, 0.92158186f, 0.93011086f, 0.93868573f, 0.94730654f, 0.95597335f, 0.96468625f,
-    0.97344529f, 0.98225055f, 0.99110210f, 1.00000000f};
+    0.97344529f, 0.98225055f, 0.99110210f, 1.00000000f
+};
 
 constexpr float epsilon = 0.008856f;
 constexpr float kappa = 903.3f;
 
 // http://www.brucelindbloom.com/index.html?WorkingSpaceInfo.html#Specifications
 // D65 sRGB illuminant values
-xyz rgb_to_xyz(rgb color) {
+static xyz rgb_to_xyz(rgb color) {
     xyz result;
 
     float x = inverse_srgb_lut[color.r];
@@ -82,7 +93,7 @@ xyz rgb_to_xyz(rgb color) {
     return result;
 }
 
-float lab_f(float t) {
+static float lab_f(float t) {
     return (t > epsilon) ? std::cbrt(t) : (kappa * t + 16.0f) / 116.0f;
 }
 
@@ -92,7 +103,7 @@ constexpr float Xr = 1.0f / 0.95047f; // Reference white point X
 constexpr float Yr = 1.0f / 1.00000f; // Reference white point Y
 constexpr float Zr = 1.0f / 1.08883f; // Reference white point Z
 
-lab xyz_to_lab(xyz color) {
+static lab xyz_to_lab(xyz color) {
     lab result;
     float xr = color.X * Xr;
     float yr = color.Y * Yr;
@@ -109,12 +120,12 @@ lab xyz_to_lab(xyz color) {
 }
 
 // Complete formulas can be found on http://www.brucelindbloom.com/
-lab rgb_to_lab(rgb color) {
+static inline lab rgb_to_lab(const rgb &color) {
     xyz xyz_color = rgb_to_xyz(color);
     return xyz_to_lab(xyz_color);
 }
 
-float lab_distance(const lab& a, const lab& b) {
+static float lab_distance(const lab& a, const lab& b) {
     float delta_L = a.L - b.L;
     float delta_a = a.a - b.a;
     float delta_b = a.b - b.b;
@@ -122,26 +133,61 @@ float lab_distance(const lab& a, const lab& b) {
     return std::sqrt(delta_L * delta_L + delta_a * delta_a + delta_b * delta_b);
 }
 
-lab lab_average(const lab& a, const lab& b) {
-    lab result;
-    result.L = (a.L + b.L) * 0.5f;
-    result.a = (a.a + b.a) * 0.5f;
-    result.b = (a.b + b.b) * 0.5f;
-    return result;
+static lab lab_lerp(const lab& a, const lab& b, const float coef) {
+    const float c1 = 1.0f - coef;
+    const float c2 = coef;
+    return lab {
+        .L = c1 * a.L + c2 * b.L,
+        .a = c1 * a.a + c2 * b.a,
+        .b = c1 * a.b + c2 * b.b
+    };
 }
 
-constexpr float MATCH = 25.0f;
-constexpr int FRAME_CANDIDATE = 10;
+static rgb rgb_lerp(const rgb& a, const rgb& b, const float coef) {
+    const float c1 = 1.0f - coef;
+    const float c2 = coef;
+    return rgb {
+        .r = (uint8_t) (c1 * (float) a.r + c2 * (float) b.r),
+        .g = (uint8_t) (c1 * (float) a.g + c2 * (float) b.g),
+        .b = (uint8_t) (c1 * (float) a.b + c2 * (float) b.b)
+    };
+}
 
-float background_estimation(states& state, const rgb& rgb_pixel) {
+static inline lab lab_average(const lab& a, const lab& b) {
+    return lab_lerp(a, b, 0.5f);
+}
+
+static float background_estimation(states& state, const rgb& rgb_pixel) {
     lab lab_pixel = rgb_to_lab(rgb_pixel);
+
     if (state.last_match < 0) {
         state.background = lab_pixel;
-        state.candidate = lab_pixel; // May cause issues?? (not in doc)
+        state.rgb_background = rgb_pixel;
+        state.candidate = lab_pixel; // May cause issues?? (not in doc (which doc ?))
+        state.last_match = 0;
+    }
+
+    //if (match_distance < MATCH) {
+    //    state.background = lab_lerp(state.background, lab_pixel, 0.1f);
+    //}
+
+    float candidate_distance = lab_distance(state.candidate, lab_pixel);
+    if (candidate_distance < 4.0f) {
+        state.candidate = lab_lerp(state.candidate, lab_pixel, 0.2f);
+        if (state.last_match >= FRAME_CANDIDATE) {
+            state.background = state.candidate;
+            state.rgb_background = rgb_pixel;
+        } else {
+            state.last_match++;
+        }
+    } else {
+        state.last_match = 1;
+        state.candidate = lab_pixel;
     }
 
     float match_distance = lab_distance(state.background, lab_pixel);
 
+    /*
     if (match_distance < MATCH) {
         state.last_match = 0;
         state.background = lab_average(state.background, lab_pixel);
@@ -159,6 +205,7 @@ float background_estimation(states& state, const rgb& rgb_pixel) {
             state.last_match = 0;
         }
     }
+    */
 
     return match_distance;
 }
@@ -166,19 +213,46 @@ float background_estimation(states& state, const rgb& rgb_pixel) {
 // Please check if it works
 // This Erosion for BINARIZED images ONLY ([0, 255])
 // Maybe we would want to adapt for greyscale images
-void erode(const uint8_t* buffer, uint8_t* output, int size, int width, int height, int stride) {
+static void erode(const float* input, float* output, int size, int width, int height, int stride) {
+    int kernel_size = 0;
+    for (int dy = -size; dy <= size; ++dy) {
+        for (int dx = -size; dx <= size; ++dx) {
+            // Check if the pixel is inside the kernel (circle shape)
+            if (dx * dx + dy * dy > size * size) {
+                continue;
+            }
+            kernel_size++;
+        }
+    }
+
+    const int threshold = kernel_size / 8;
+
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
+            int nb_low_pixels = 0;
             for (int dy = -size; dy <= size; ++dy) {
                 for (int dx = -size; dx <= size; ++dx) {
+                    // Check if the pixel is inside the kernel (circle shape)
                     if (dx * dx + dy * dy > size * size) {
                         continue;
                     }
-                    uint8_t value = buffer[(y + dy) * stride + (x + dx)];
-                    if (!value) {
-                        output[y * stride + x] = 0;
+
+                    // Check if the pixel is inside the image
+                    if (y + dy < 0 || y + dy >= height || x + dx < 0 || x + dx >= width) {
+                        continue;
+                    }
+
+                    const float value = input[(y + dy) * stride + (x + dx)];
+                    if (value < 0.5f) {
+                        nb_low_pixels++;
                     }
                 }
+            }
+
+            if (nb_low_pixels >= threshold) {
+                output[y * stride + x] = 0.0f;
+            } else {
+                output[y * stride + x] = 1.0f;
             }
         }
     }
@@ -187,81 +261,242 @@ void erode(const uint8_t* buffer, uint8_t* output, int size, int width, int heig
 // Please check if it works
 // This Dilation is for BINARIZED images ONLY ([0, 255])
 // Maybe we would want to adapt for greyscale images
-void dilate(const uint8_t* buffer, uint8_t* output, int size, int width, int height, int stride) {
+static void dilate(const float* input, float* output, int size, int width, int height, int stride) {
+    int kernel_size = 0;
+    for (int dy = -size; dy <= size; ++dy) {
+        for (int dx = -size; dx <= size; ++dx) {
+            // Check if the pixel is inside the kernel (circle shape)
+            if (dx * dx + dy * dy > size * size) {
+                continue;
+            }
+            kernel_size++;
+        }
+    }
+
+    const int threshold = kernel_size / 8;
+
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
+            int nb_high_pixels = 0;
             for (int dy = -size; dy <= size; ++dy) {
                 for (int dx = -size; dx <= size; ++dx) {
+                    // Check if the pixel is inside the kernel (circle shape)
                     if (dx * dx + dy * dy > size * size) {
                         continue;
                     }
-                    uint8_t value = buffer[(y + dy) * stride + (x + dx)];
-                    if (value) {
-                        output[y * stride + x] = 255;
+
+                    // Check if the pixel is inside the image
+                    if (y + dy < 0 || y + dy >= height || x + dx < 0 || x + dx >= width) {
+                        continue;
+                    }
+
+                    const float value = input[(y + dy) * stride + (x + dx)];
+                    if (value > 0.5f) {
+                        nb_high_pixels++;
+                    }
+                }
+            }
+
+            if (nb_high_pixels >= threshold) {
+                output[y * stride + x] = 1.0f;
+            } else {
+                output[y * stride + x] = 0.0f;
+            }
+        }
+    }
+}
+
+struct vector2i {
+    int x;
+    int y;
+};
+
+
+// Starting from seed points, expand to neightboors following a mask
+static void seed(
+    const float* mask, const float* seeds, float* output,
+    int width, int height, int stride
+) {
+    memcpy(output, seeds, stride * height * sizeof(float));
+
+    constexpr vector2i NEIGHBORS[] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+
+    const int max_queue_size = width * height / 2;
+    vector2i queue[max_queue_size];
+    int queue_size = 0;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (seeds[y * stride + x] > 0.5f) {
+                for (const vector2i &offset : NEIGHBORS) {
+                    // Get neighbor coordinates
+                    const int nx = x + offset.x;
+                    const int ny = y + offset.y;
+
+                    // Check if inside image boundaries
+                    if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                        continue;
+                    }
+
+                    if (mask[ny * stride + nx] > 0.5f) {
+                        output[ny * stride + nx] = 1.0f;
+                        queue[queue_size++] = {nx, ny};
                     }
                 }
             }
         }
     }
-}
 
-// Hysteresis seems to be applied for colored images, after dilation and erosion,
-// To be checked
-// https://developer.imageviz.com/refmans/latest/ImageDev/html/Processing_ImageSegmentation_Binarization_HysteresisThresholding.html
-void hysteresis(const uint8_t* input, uint8_t* output, int width, int height, int stride, uint8_t low_threshold,
-                uint8_t high_threshold) {
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            uint8_t value = input[y * stride + x];
-            if (value >= high_threshold) {
-                output[y * stride + x] = 255;
-            } else if (value < low_threshold) {
-                output[y * stride + x] = 0;
-            } else {
-                // To complete
-                /*
-                On propage les pixels des
-                marqueurs dans le masque jusqu’
-                à stabilité.
-                Les marqueurs sont initialisés
-                avec les éléments supérieurs au
-                seuil haut.
-                L’entrée contient tous les
-                éléments supérieurs au seuil bas
-                */
+    while (queue_size > 0) {
+        const vector2i current = queue[--queue_size];
+        for (const vector2i &offset : NEIGHBORS) {
+            // Get neighbor coordinates
+            const int nx = current.x + offset.x;
+            const int ny = current.y + offset.y;
 
-                // 4-connectivity / 8-connectivity neighbors ??????
+            // Check if inside image boundaries
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                continue;
+            }
+
+            if (mask[ny * stride + nx] > 0.5f && output[ny * stride + nx] == 0.0f) {
+                output[ny * stride + nx] = 1.0f;
+                queue[queue_size++] = {nx, ny};
             }
         }
     }
 }
 
-extern "C" {
-void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride) {
 
+// Hysteresis seems to be applied for colored images, after dilation and erosion,
+// To be checked
+// https://developer.imageviz.com/refmans/latest/ImageDev/html/Processing_ImageSegmentation_Binarization_HysteresisThresholding.html
+static void hysteresis(
+    const float* input, float* output,
+    int width, int height, int stride,
+    float low_threshold, float high_threshold
+) {
+    constexpr vector2i NEIGHBORS[] = {
+        { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }
+    };
+
+    const int mx = width - 1;
+    const int my = height - 1;
+
+    const int max_queue_size = width * height / 2;
+    vector2i queue[max_queue_size];
+    int queue_size = 0;
+
+    for (int y = 1; y < my; ++y) {
+        for (int x = 1; x < mx; ++x) {
+            const float value = input[y * stride + x];
+            if (value >= high_threshold) {
+                output[y * stride + x] = 1.0f;
+            } else if (value < low_threshold) {
+                output[y * stride + x] = 0.0f;
+            } else {
+                output[y * stride + x] = 0.5;
+                for (const vector2i &offset : NEIGHBORS) {
+                    const int nx = x + offset.x;
+                    const int ny = y + offset.y;
+                    if (input[ny * stride + nx] >= high_threshold) {
+                        output[y * stride + x] = 1.0f;
+                        queue[queue_size++] = {x, y};
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    while (queue_size > 0) {
+        const vector2i current = queue[--queue_size];
+        for (const vector2i &offset : NEIGHBORS) {
+            // Get neighbor coordinates
+            const int nx = current.x + offset.x;
+            const int ny = current.y + offset.y;
+
+            // Check if inside image boundaries
+            if (nx < 0 || nx >= width || ny < 0 || ny >= height) {
+                continue;
+            }
+
+            // Check if neighbor is already between low and high thresholds
+            if (output[ny * stride + nx] == 0.5f) {
+                output[ny * stride + nx] = 1.0f;
+                queue[queue_size++] = {nx, ny};
+            }
+        }
+    }
+
+    // Set all unconnected pixels between low and high threshold to 0
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            if (output[y * stride + x] == 0.5f) {
+                output[y * stride + x] = 0.0f;
+            }
+        }
+    }
+
+    // Set output left and right border to 0
+    const int last_column_offset = width - 1;
+    for (int y = 0; y < height; ++y) {
+        output[y * stride] = 0.0f;
+        output[y * stride + last_column_offset] = 0.0f;
+    }
+
+    // Set output top and bottom border to 0
+    const int last_line_offset = (height - 1) * stride;
+    for (int x = 0; x < width; ++x) {
+        output[x] = 0.0f;
+        output[last_line_offset + x] = 0.0f;
+    }
+}
+
+extern "C" void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride) {
     if (pixel_states == nullptr) {
         pixel_states = new states[width * height];
     }
 
+    float buffer_1[width * height];
+    float buffer_2[width * height];
+    float buffer_3[width * height];
+
+    // Compute movement estimation for each pixel
     for (int y = 0; y < height; ++y) {
         rgb* lineptr = (rgb*)(buffer + y * stride);
         for (int x = 0; x < width; ++x) {
             rgb pixel = lineptr[x];
-            lab lab_pixel = rgb_to_lab(pixel);
-
-            float match_distance = background_estimation(pixel_states[y * width + x], pixel);
-            uint8_t intensity = std::min(static_cast<int>(match_distance * 5.0f), 255);
-
-            lineptr[x].r = intensity;
-            lineptr[x].g = 0;
-            lineptr[x].b = 255 - intensity;
+            const float match_distance = background_estimation(pixel_states[y * width + x], pixel);
+            buffer_1[y * width + x] = match_distance;
         }
     }
+
+    hysteresis(buffer_1, buffer_2, width, height, width, 10.0f, 50.0f);
+    erode(buffer_2, buffer_1, 5, width, height, width);
+    dilate(buffer_1, buffer_3, 4, width, height, width);
+    seed(buffer_2, buffer_3, buffer_1, width, height, width);
 
     // New buffer / change how we handle buffers (TODO / SAVE ORIGIN BUFFER AND CREATE NEW MASK /// memcpy??)
     // Greyscale or binarize buffer (for erosion and dilation)
     // Erode and dilate BW BUFFER (MOSTLY DONE, BINARY ONLY SUPPORTED FOR NOW)
     // Hysteresis (TO COMPLETE / CHECK) // Seems that input is colored/grey and output is binary
     // Use BW buffer to mask
-}
+
+    // Render result
+    const float* render_buffer = buffer_1;
+    for (int y = 0; y < height; ++y) {
+        rgb* lineptr = (rgb*)(buffer + y * stride);
+        for (int x = 0; x < width; ++x) {
+            const uint8_t intensity = std::min(static_cast<int>(render_buffer[y * width + x] * 255.0f), 255);
+
+            //lineptr[x] = pixel_states[y * width + x].rgb_background;
+
+            lineptr[x].r = intensity;
+            lineptr[x].g = 0;
+            lineptr[x].b = 255 - intensity;
+        }
+    }
 }

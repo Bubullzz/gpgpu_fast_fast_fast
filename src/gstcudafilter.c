@@ -249,7 +249,7 @@ plugin_init (GstPlugin * plugin)
 
   /* FIXME Remember to set the rank if it's an element that is meant
      to be autoplugged by decodebin. */
-  return gst_element_register (plugin, "cudafilter", GST_RANK_NONE,
+  return gst_element_register (plugin, GST_PIPELINE_ELEMENT_NAME, GST_RANK_NONE,
       GST_TYPE_CUDA_FILTER);
 }
 
@@ -272,7 +272,7 @@ plugin_init (GstPlugin * plugin)
 
 GST_PLUGIN_DEFINE (GST_VERSION_MAJOR,
     GST_VERSION_MINOR,
-    cudafilter,
+    GST_PLUGIN_NAME,
     "FIXME plugin description",
     plugin_init, VERSION, "LGPL", PACKAGE_NAME, GST_PACKAGE_ORIGIN)
 
