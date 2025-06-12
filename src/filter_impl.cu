@@ -15,6 +15,9 @@
 #define DISK_RADIUS 3
 #define TILE_WIDTH 16
 #define LOADED_WIDTH (TILE_WIDTH + 2 * (DISK_RADIUS - 1))
+
+#define HYTERESIS_HIGH 30
+#define HYTERESIS_LOW 4
 template <typename T>
 void check(T err, const char* const func, const char* const file,
            const int line)
@@ -40,6 +43,7 @@ struct mask_infos {
     lab bg;
     lab candidate;
     unsigned long output;
+    bool hysteresis = false;
     unsigned long time;
 };
 
@@ -165,6 +169,15 @@ __global__ void setup_mask_first_frame(lab* first_frame, mask_infos* mask, int f
     curr_mask->output = 0;
 }
 
+__global__ void reset_hysteresis(mask_infos* mask, int mask_stride, int width, int height) {
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    if (x >= width || y >= height)
+        return;
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    curr_mask->hysteresis = false;
+}
+
 __global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stride, int mask_stride, int width, int height) {
     int GHOSTING = 5;
 
@@ -227,14 +240,11 @@ __global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int m
     rgb* curr_rgb = &((rgb*)((std::byte*)buff + y * buff_stride))[x];
     mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
 
-    if (curr_mask->output < 25 * 25) {
-        *curr_rgb = {0,0,0};
+    if (curr_mask->hysteresis) {
+        *curr_rgb = {255,255,255};
     }
     else
-        *curr_rgb = {255,255,255};
-    uint8_t v = curr_mask->output > 255 ? 255 : curr_mask->output;
-
-    *curr_rgb = {v,v,v};
+        *curr_rgb = {0,0,0};
 }
 
 // Assuming being called on squared blocks of TILE_WIDTH * TILE_WIDTH
@@ -323,6 +333,55 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     curr_mask->output = max;
 }
 
+// Assuming being called on squared blocks of TILE_WIDTH * TILE_WIDTH
+__global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int height, bool* changed) {
+    __shared__ bool hysteresis[LOADED_WIDTH][LOADED_WIDTH];
+
+    int y = blockIdx.y * TILE_WIDTH + threadIdx.y;
+    int x = blockIdx.x * TILE_WIDTH + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int block_y = blockIdx.y * TILE_WIDTH;
+    int block_x = blockIdx.x * TILE_WIDTH;
+
+    // LOADING SHARED MEMORY
+    int src = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    while (src < LOADED_WIDTH * LOADED_WIDTH) {
+        int dest_y = src / LOADED_WIDTH;
+        int dest_x = src % LOADED_WIDTH;
+        src += TILE_WIDTH * TILE_WIDTH;
+        int pos_y = block_y - (DISK_RADIUS - 1) + dest_y;
+        int pos_x = block_x - (DISK_RADIUS - 1) + dest_x;
+        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
+            hysteresis[dest_y][dest_x] = false;
+            continue; // On the border
+        }
+        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
+        hysteresis[dest_y][dest_x] = curr_mask->hysteresis;
+    }
+    __syncthreads();
+    // HYSTERESIS
+    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    if (curr_mask->hysteresis || curr_mask->output < HYTERESIS_LOW) // Already computed or under thershold
+        return;
+
+    if (curr_mask->output > HYTERESIS_HIGH) {
+        curr_mask->hysteresis = true;
+        *changed = true;
+    }
+    // Computing doubt values
+    for (int i = -(DISK_RADIUS-1); i <= (DISK_RADIUS-1); i++) {
+        for (int j = -(DISK_RADIUS-1); j <= (DISK_RADIUS-1); j++) {
+            if (hysteresis[threadIdx.y + j + (DISK_RADIUS-1)][threadIdx.x + i +(DISK_RADIUS-1)]) {
+                curr_mask->hysteresis = true;
+                *changed = true;
+            }
+        }
+    }
+}
+
 namespace 
 {
     void load_logo()
@@ -389,6 +448,8 @@ extern "C" {
             err = cudaGetLastError(); // Get launch error
             CHECK_CUDA_ERROR(err);
         }
+        reset_hysteresis<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
+
         update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
         cudaDeviceSynchronize();
         err = cudaGetLastError(); // Get launch error
@@ -399,6 +460,18 @@ extern "C" {
         cudaDeviceSynchronize();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
+
+        bool h_change = true;
+        bool* d_change;
+        cudaMalloc(&d_change, sizeof(bool));
+        while (h_change) {
+            cudaMemset(d_change, false, sizeof(bool));
+            hysteresis<<<gridSize, blockSize>>>(mask, mask_pitch, width, height, d_change);
+            cudaDeviceSynchronize();
+            CHECK_CUDA_ERROR(cudaGetLastError());
+
+            cudaMemcpy(&h_change, d_change, sizeof(bool), cudaMemcpyDeviceToHost);
+        }
 
         display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, mask, rgb_pitch, mask_pitch, width, height);
         cudaDeviceSynchronize();
