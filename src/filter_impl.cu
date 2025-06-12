@@ -36,7 +36,7 @@ struct lab {
 struct mask_infos {
     lab bg;
     lab candidate;
-    bool output;
+    unsigned long output;
     unsigned long time;
 };
 
@@ -91,7 +91,6 @@ __global__ void remove_red_channel_inp(std::byte* buffer, int width, int height,
 
     rgb* lineptr = (rgb*) (buffer + y * stride);
     if (y < logo_height && x < logo_width) {
-        float alpha = logo[y * logo_width + x] / 255.f;
         lineptr[x].r = 255;
         lineptr[x].g = 0; //uint8_t(alpha * lineptr[x].g + (1-alpha) * 255);
         lineptr[x].b = 0; //uint8_t(alpha * lineptr[x].b + (1-alpha) * 255);
@@ -143,76 +142,94 @@ __global__ void rgb_to_lab(rgb* rgb_buff, lab* lab_buff, int width, int height, 
     float A = 500.0f * (fx - fy);
     float B = 200.0f * (fy - fz);
 
-    lab_col->l = L * 2.55;
-    lab_col->a = A + 128;
-    lab_col->b = B + 128;
-
-    rgb_col->r = lab_col->l;
-    rgb_col->g = lab_col->a;
-    rgb_col->b = lab_col->b;
+    lab_col->l = L;
+    lab_col->a = A;
+    lab_col->b = B;
 }
-__global__ void setup_mask_fisrt_frame(std::byte* first_frame, mask_infos* mask, int first_frame_stride, int mask_stride, int width, int height) {
+__global__ void setup_mask_first_frame(lab* first_frame, mask_infos* mask, int first_frame_stride, int mask_stride, int width, int height) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (x >= width || y >= height)
         return;
 
-    rgb* curr_rgb = (rgb*) (first_frame + y * first_frame_stride + x);
-    mask_infos* current_mask_infos = mask + y * mask_stride + x;
+    lab* curr_lab = &((lab*)((std::byte*)first_frame + y * first_frame_stride))[x];
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
 
-    //current_mask_infos->bg =
-
-
+    curr_mask->bg = *curr_lab;
+    curr_mask->candidate = *curr_lab;
+    curr_mask->time = 0;
+    curr_mask->output = 0;
 }
 
-__global__ void background_mask(std::byte* curr_frame, std::byte* background, std::byte* candidate, std::uint8_t* output, long* my_time, int width, int height, int stride) {
+__global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stride, int mask_stride, int width, int height) {
+    int GHOSTING = 5;
+
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (x >= width || y >= height)
         return;
-    rgb* curr_frame_lineptr = (rgb*) (curr_frame + y * stride);
-    rgb* background_lineptr = (rgb*) (background + y * stride);
-    rgb* candidate_lineptr = (rgb*) (candidate + y * stride);
-    uint8_t* output_lineptr = (uint8_t*) (output + y * stride);
-    int dl = background_lineptr[x].r - curr_frame_lineptr[x].r;
-    int da = background_lineptr[x].g - curr_frame_lineptr[x].g;
-    int db = background_lineptr[x].b - curr_frame_lineptr[x].b;
+
+    lab* curr_lab = &((lab*)((std::byte*)lab_frame + y * lab_frame_stride))[x];
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+
+    int dl = curr_lab->l - curr_mask->bg.l;
+    int da = curr_lab->a - curr_mask->bg.a;
+    int db = curr_lab->b - curr_mask->bg.b;
 
     int tot_dist = dl * dl + da * da + db * db;
     if (tot_dist >= 25 * 25) { // we do not have a match
-        if (*my_time == 0) {
-            candidate_lineptr[x] = curr_frame_lineptr[x];
+        if (curr_mask->time == 0) {
+            curr_mask->candidate = *curr_lab;
+            curr_mask->time += 1;
         }
-        else if (*my_time < 100) {
-            candidate_lineptr[x].r = candidate_lineptr[x].r / 2 + curr_frame_lineptr[x].r / 2;
-            candidate_lineptr[x].g = candidate_lineptr[x].g / 2 + curr_frame_lineptr[x].g / 2;
-            candidate_lineptr[x].b = candidate_lineptr[x].b / 2 + curr_frame_lineptr[x].b / 2;
+        else if (curr_mask->time < GHOSTING) {
+            curr_mask->candidate.l /= 2;
+            curr_mask->candidate.a /= 2;
+            curr_mask->candidate.b /= 2;
+            curr_mask->candidate.l += curr_lab->l / 2;
+            curr_mask->candidate.a += curr_lab->a / 2;
+            curr_mask->candidate.b += curr_lab->b / 2;
+
+            curr_mask->time += 1;
         }
         else {
-            rgb tmp = background_lineptr[x];
-            background_lineptr[x] = candidate_lineptr[x];
-            candidate_lineptr[x] = tmp;
+            lab tmp = curr_mask->bg;
+            curr_mask->bg = curr_mask->candidate;
+            curr_mask->candidate = tmp;
+            curr_mask->time = 0;
         }
     }
     else {
-        background_lineptr[x].r = background_lineptr[x].r / 2 + curr_frame_lineptr[x].r / 2;
-        background_lineptr[x].g = background_lineptr[x].g / 2 + curr_frame_lineptr[x].g / 2;
-        background_lineptr[x].b = background_lineptr[x].b / 2 + curr_frame_lineptr[x].b / 2;
-    }
-    output_lineptr[x] = tot_dist < 25 * 25;
-    if (tot_dist >= 25 * 25) {
-        curr_frame_lineptr[x].r = 0;
-        curr_frame_lineptr[x].g = 0;
-        curr_frame_lineptr[x].b = 0;
-    }
-    else {
-        curr_frame_lineptr[x].r = 255;
-        curr_frame_lineptr[x].g = 255;
-        curr_frame_lineptr[x].b = 255;
+        curr_mask->bg.l /= 2;
+        curr_mask->bg.a /= 2;
+        curr_mask->bg.b /= 2;
+        curr_mask->bg.l += curr_lab->l / 2;
+        curr_mask->bg.a += curr_lab->a / 2;
+        curr_mask->bg.b += curr_lab->b / 2;
+        curr_mask->time = 0;
     }
 
+    curr_mask->output = tot_dist;
+}
+
+__global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int mask_stride, int width, int height) {
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    rgb* curr_rgb = &((rgb*)((std::byte*)buff + y * buff_stride))[x];
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+
+    if (curr_mask->output < 25 * 25) {
+        *curr_rgb = {0,0,0};
+    }
+    else
+        *curr_rgb = {255,255,255};
+    *curr_rgb = {(uint8_t)curr_mask->output, (uint8_t)curr_mask->output, (uint8_t)curr_mask->output};
 }
 
 namespace 
@@ -274,9 +291,22 @@ extern "C" {
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
-        err = cudaDeviceSynchronize();
+        if (mask == nullptr) {
+            err = cudaMallocPitch(&mask, &mask_pitch, width * sizeof(mask_infos), height);
+            CHECK_CUDA_ERROR(err);
+            setup_mask_first_frame<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
+            err = cudaGetLastError(); // Get launch error
+            CHECK_CUDA_ERROR(err);
+        }
+        update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
+        err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
+        display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, mask, rgb_pitch, mask_pitch, width, height);
+
+        // Final Copy
+        err = cudaDeviceSynchronize();
+        CHECK_CUDA_ERROR(err);
         err = cudaMemcpy2D(src_buffer, src_stride, d_rgb_buffer, rgb_pitch, width * sizeof(rgb), height, cudaMemcpyDeviceToHost);
         CHECK_CUDA_ERROR(err);
 
