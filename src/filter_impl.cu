@@ -12,6 +12,9 @@
 #include "logo.h"
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
+#define DISK_RADIUS 3
+#define TILE_WIDTH 16
+#define LOADED_WIDTH (TILE_WIDTH + 2 * (DISK_RADIUS - 1))
 template <typename T>
 void check(T err, const char* const func, const char* const file,
            const int line)
@@ -229,7 +232,95 @@ __global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int m
     }
     else
         *curr_rgb = {255,255,255};
-    *curr_rgb = {(uint8_t)curr_mask->output, (uint8_t)curr_mask->output, (uint8_t)curr_mask->output};
+    uint8_t v = curr_mask->output > 255 ? 255 : curr_mask->output;
+
+    *curr_rgb = {v,v,v};
+}
+
+// Assuming being called on squared blocks of TILE_WIDTH * TILE_WIDTH
+__global__ void erosion(mask_infos* mask, int mask_stride, int width, int height) {
+    __shared__ int distances[LOADED_WIDTH][LOADED_WIDTH];
+
+    int y = blockIdx.y * TILE_WIDTH + threadIdx.y;
+    int x = blockIdx.x * TILE_WIDTH + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int block_y = blockIdx.y * TILE_WIDTH;
+    int block_x = blockIdx.x * TILE_WIDTH;
+
+    // LOADING SHARED MEMORY
+    int src = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    while (src < LOADED_WIDTH * LOADED_WIDTH) {
+        int dest_y = src / LOADED_WIDTH;
+        int dest_x = src % LOADED_WIDTH;
+        src += TILE_WIDTH * TILE_WIDTH;
+        int pos_y = block_y - (DISK_RADIUS - 1) + dest_y;
+        int pos_x = block_x - (DISK_RADIUS - 1) + dest_x;
+        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
+            distances[dest_y][dest_x] = 0;
+            continue; // On the border
+        }
+        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
+        distances[dest_y][dest_x] = curr_mask->output;
+    }
+    __syncthreads();
+
+    // EROSION
+    unsigned long min = 1000000;
+    for (int i = -(DISK_RADIUS-1); i <= (DISK_RADIUS-1); i++) {
+        for (int j = -(DISK_RADIUS-1); j <= (DISK_RADIUS-1); j++) {
+            unsigned long curr = distances[threadIdx.y + j + (DISK_RADIUS-1)][threadIdx.x + i +(DISK_RADIUS-1)];
+            min = curr < min ? curr : min;
+        }
+    }
+
+    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    curr_mask->output = min;
+}
+
+// Assuming being called on squared blocks of TILE_WIDTH * TILE_WIDTH
+__global__ void dilatation(mask_infos* mask, int mask_stride, int width, int height) {
+    __shared__ int distances[LOADED_WIDTH][LOADED_WIDTH];
+
+    int y = blockIdx.y * TILE_WIDTH + threadIdx.y;
+    int x = blockIdx.x * TILE_WIDTH + threadIdx.x;
+
+    if (x >= width || y >= height)
+        return;
+
+    int block_y = blockIdx.y * TILE_WIDTH;
+    int block_x = blockIdx.x * TILE_WIDTH;
+
+    // LOADING SHARED MEMORY
+    int src = threadIdx.y * TILE_WIDTH + threadIdx.x;
+    while (src < LOADED_WIDTH * LOADED_WIDTH) {
+        int dest_y = src / LOADED_WIDTH;
+        int dest_x = src % LOADED_WIDTH;
+        src += TILE_WIDTH * TILE_WIDTH;
+        int pos_y = block_y - (DISK_RADIUS - 1) + dest_y;
+        int pos_x = block_x - (DISK_RADIUS - 1) + dest_x;
+        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
+            distances[dest_y][dest_x] = 0;
+            continue; // On the border
+        }
+        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
+        distances[dest_y][dest_x] = curr_mask->output;
+    }
+    __syncthreads();
+
+    // DILATATION
+    unsigned long max = 0;
+    for (int i = -(DISK_RADIUS-1); i <= (DISK_RADIUS-1); i++) {
+        for (int j = -(DISK_RADIUS-1); j <= (DISK_RADIUS-1); j++) {
+            unsigned long curr = distances[threadIdx.y + j + (DISK_RADIUS-1)][threadIdx.x + i +(DISK_RADIUS-1)];
+            max = curr > max ? curr : max;
+        }
+    }
+
+    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    curr_mask->output = max;
 }
 
 namespace 
@@ -284,7 +375,7 @@ extern "C" {
         err = cudaMallocPitch(&d_lab_buffer, &lab_pitch, width * sizeof(lab), height);
         CHECK_CUDA_ERROR(err);
 
-        dim3 blockSize(16,16);
+        dim3 blockSize(TILE_WIDTH,TILE_WIDTH);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
         rgb_to_lab<<<gridSize, blockSize>>>(d_rgb_buffer, d_lab_buffer, width, height, rgb_pitch, lab_pitch);
@@ -299,10 +390,20 @@ extern "C" {
             CHECK_CUDA_ERROR(err);
         }
         update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
+        cudaDeviceSynchronize();
+        err = cudaGetLastError(); // Get launch error
+        CHECK_CUDA_ERROR(err);
+
+        erosion<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
+        dilatation<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
+        cudaDeviceSynchronize();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
         display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, mask, rgb_pitch, mask_pitch, width, height);
+        cudaDeviceSynchronize();
+        err = cudaGetLastError(); // Get launch error
+        CHECK_CUDA_ERROR(err);
 
         // Final Copy
         err = cudaDeviceSynchronize();
