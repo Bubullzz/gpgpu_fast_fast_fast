@@ -179,7 +179,7 @@ __global__ void reset_hysteresis(mask_infos* mask, int mask_stride, int width, i
 }
 
 __global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stride, int mask_stride, int width, int height) {
-    int GHOSTING = 5;
+    int GHOSTING = 50;
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -241,10 +241,8 @@ __global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int m
     mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
 
     if (curr_mask->hysteresis) {
-        *curr_rgb = {255,255,255};
+        curr_rgb->r = (int)curr_rgb->r + 128 > 255 ? 255 : curr_rgb->r + 128;
     }
-    else
-        *curr_rgb = {0,0,0};
 }
 
 // Assuming being called on squared blocks of TILE_WIDTH * TILE_WIDTH
