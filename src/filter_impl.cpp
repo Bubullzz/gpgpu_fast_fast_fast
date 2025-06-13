@@ -31,7 +31,10 @@ struct states {
     int last_match = -1;
 };
 
-static states* pixel_states = nullptr;
+struct vector2i {
+    int x;
+    int y;
+};
 
 // This lut table was generated using the following function (values reducted between 0 and 1):
 // // SRGB to XZY to Lab conversion
@@ -210,32 +213,24 @@ static float background_estimation(states& state, const rgb& rgb_pixel) {
     return match_distance;
 }
 
-// Please check if it works
-// This Erosion for BINARIZED images ONLY ([0, 255])
-// Maybe we would want to adapt for greyscale images
-static void erode(const float* input, float* output, int size, int width, int height, int stride) {
-    int kernel_size = 0;
+static void blur(const float* input, float* output, int size, int width, int height, int stride) {
+    float weights_sum = 0.0f;
     for (int dy = -size; dy <= size; ++dy) {
         for (int dx = -size; dx <= size; ++dx) {
             // Check if the pixel is inside the kernel (circle shape)
-            if (dx * dx + dy * dy > size * size) {
-                continue;
-            }
-            kernel_size++;
+            //if (dx * dx + dy * dy > size * size) continue;
+            weights_sum += 1.0f;
         }
     }
 
-    const int threshold = kernel_size / 8;
-
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            int nb_low_pixels = 0;
+            float sum_value = 0.0f;
+
             for (int dy = -size; dy <= size; ++dy) {
                 for (int dx = -size; dx <= size; ++dx) {
                     // Check if the pixel is inside the kernel (circle shape)
-                    if (dx * dx + dy * dy > size * size) {
-                        continue;
-                    }
+                    //if (dx * dx + dy * dy > size * size) continue;
 
                     // Check if the pixel is inside the image
                     if (y + dy < 0 || y + dy >= height || x + dx < 0 || x + dx >= width) {
@@ -243,17 +238,53 @@ static void erode(const float* input, float* output, int size, int width, int he
                     }
 
                     const float value = input[(y + dy) * stride + (x + dx)];
-                    if (value < 0.5f) {
-                        nb_low_pixels++;
+                    sum_value += value;
+                }
+            }
+
+            output[y * stride + x] = sum_value / weights_sum;
+        }
+    }
+}
+
+// Please check if it works
+// This Erosion for BINARIZED images ONLY ([0, 255])
+// Maybe we would want to adapt for greyscale images
+static void erode(const float* input, float* output, int size, int width, int height, int stride) {
+    // int kernel_size = 0;
+    // for (int dy = -size; dy <= size; ++dy) {
+    //     for (int dx = -size; dx <= size; ++dx) {
+    //         // Check if the pixel is inside the kernel (circle shape)
+    //         //if (dx * dx + dy * dy > size * size) continue;
+    //         kernel_size++;
+    //     }
+    // }
+
+    //const int threshold = kernel_size / 8;
+
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            //int nb_low_pixels = 0;
+            float min_value = INFINITY;
+
+            for (int dy = -size; dy <= size; ++dy) {
+                for (int dx = -size; dx <= size; ++dx) {
+                    // Check if the pixel is inside the kernel (circle shape)
+                    //if (dx * dx + dy * dy > size * size) continue;
+
+                    // Check if the pixel is inside the image
+                    if (y + dy < 0 || y + dy >= height || x + dx < 0 || x + dx >= width) {
+                        continue;
+                    }
+
+                    const float value = input[(y + dy) * stride + (x + dx)];
+                    if (value < min_value) {
+                        min_value = value;
                     }
                 }
             }
 
-            if (nb_low_pixels >= threshold) {
-                output[y * stride + x] = 0.0f;
-            } else {
-                output[y * stride + x] = 1.0f;
-            }
+            output[y * stride + x] = min_value;
         }
     }
 }
@@ -262,28 +293,26 @@ static void erode(const float* input, float* output, int size, int width, int he
 // This Dilation is for BINARIZED images ONLY ([0, 255])
 // Maybe we would want to adapt for greyscale images
 static void dilate(const float* input, float* output, int size, int width, int height, int stride) {
-    int kernel_size = 0;
-    for (int dy = -size; dy <= size; ++dy) {
-        for (int dx = -size; dx <= size; ++dx) {
-            // Check if the pixel is inside the kernel (circle shape)
-            if (dx * dx + dy * dy > size * size) {
-                continue;
-            }
-            kernel_size++;
-        }
-    }
+    // int kernel_size = 0;
+    // for (int dy = -size; dy <= size; ++dy) {
+    //     for (int dx = -size; dx <= size; ++dx) {
+    //         // Check if the pixel is inside the kernel (circle shape)
+    //         //if (dx * dx + dy * dy > size * size) continue;
+    //         kernel_size++;
+    //     }
+    // }
 
-    const int threshold = kernel_size / 8;
+    //const int threshold = kernel_size / 8;
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            int nb_high_pixels = 0;
+            //int nb_high_pixels = 0;
+            float max_value = 0.0f;
+
             for (int dy = -size; dy <= size; ++dy) {
                 for (int dx = -size; dx <= size; ++dx) {
                     // Check if the pixel is inside the kernel (circle shape)
-                    if (dx * dx + dy * dy > size * size) {
-                        continue;
-                    }
+                    //if (dx * dx + dy * dy > size * size) continue;
 
                     // Check if the pixel is inside the image
                     if (y + dy < 0 || y + dy >= height || x + dx < 0 || x + dx >= width) {
@@ -291,25 +320,16 @@ static void dilate(const float* input, float* output, int size, int width, int h
                     }
 
                     const float value = input[(y + dy) * stride + (x + dx)];
-                    if (value > 0.5f) {
-                        nb_high_pixels++;
+                    if (value > max_value) {
+                        max_value = value;
                     }
                 }
             }
 
-            if (nb_high_pixels >= threshold) {
-                output[y * stride + x] = 1.0f;
-            } else {
-                output[y * stride + x] = 0.0f;
-            }
+            output[y * stride + x] = max_value;
         }
     }
 }
-
-struct vector2i {
-    int x;
-    int y;
-};
 
 
 // Starting from seed points, expand to neightboors following a mask
@@ -455,9 +475,16 @@ static void hysteresis(
     }
 }
 
+states* pixel_states = nullptr;
+float* last_result = nullptr;
+
 extern "C" void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride) {
     if (pixel_states == nullptr) {
         pixel_states = new states[width * height];
+    }
+
+    if (last_result == nullptr) {
+        last_result = new float[width * height]{};
     }
 
     float buffer_1[width * height];
@@ -468,16 +495,37 @@ extern "C" void filter_impl(uint8_t* buffer, int width, int height, int stride, 
     for (int y = 0; y < height; ++y) {
         rgb* lineptr = (rgb*)(buffer + y * stride);
         for (int x = 0; x < width; ++x) {
-            rgb pixel = lineptr[x];
-            const float match_distance = background_estimation(pixel_states[y * width + x], pixel);
-            buffer_1[y * width + x] = match_distance;
+            const float match_distance = background_estimation(pixel_states[y * width + x], lineptr[x]);
+            buffer_1[y * width + x] = match_distance; // + last_result[y * width + x] * 5.0f;
         }
     }
 
-    hysteresis(buffer_1, buffer_2, width, height, width, 10.0f, 50.0f);
-    erode(buffer_2, buffer_1, 5, width, height, width);
-    dilate(buffer_1, buffer_3, 4, width, height, width);
-    seed(buffer_2, buffer_3, buffer_1, width, height, width);
+    float* render_buffer = buffer_1;
+
+    // hysteresis(buffer_1, buffer_2, width, height, width, 10.0f, 50.0f);
+    // erode(buffer_2, buffer_1, 3, width, height, width);
+    // dilate(buffer_1, buffer_3, 1, width, height, width);
+    // seed(buffer_2, buffer_3, buffer_1, width, height, width);
+    // render_buffer = buffer_1;
+
+    // hysteresis(buffer_1, buffer_2, width, height, width, 10.0f, 50.0f);
+    // dilate(buffer_2, buffer_1, 2, width, height, width);
+    // erode(buffer_1, buffer_3, 5, width, height, width);
+    // seed(buffer_2, buffer_3, buffer_1, width, height, width);
+    // render_buffer = buffer_1;
+
+    erode(buffer_1, buffer_2, 3, width, height, width);
+    dilate(buffer_2, buffer_1, 3, width, height, width);
+    hysteresis(buffer_1, buffer_2, width, height, width, 4.0f, 30.0f);
+    render_buffer = buffer_2;
+
+    // hysteresis(buffer_1, buffer_2, width, height, width, 10.0f, 50.0f);
+    // blur(buffer_2, buffer_3, 3, width, height, width);
+    // hysteresis(buffer_3, buffer_1, width, height, width, 0.5f, 0.6f);
+    // erode(buffer_1, buffer_3, 4, width, height, width);
+    // dilate(buffer_3, buffer_1, 3, width, height, width);
+    // seed(buffer_2, buffer_1, buffer_3, width, height, width);
+    // render_buffer = buffer_3;
 
     // New buffer / change how we handle buffers (TODO / SAVE ORIGIN BUFFER AND CREATE NEW MASK /// memcpy??)
     // Greyscale or binarize buffer (for erosion and dilation)
@@ -486,17 +534,25 @@ extern "C" void filter_impl(uint8_t* buffer, int width, int height, int stride, 
     // Use BW buffer to mask
 
     // Render result
-    const float* render_buffer = buffer_1;
+
+    memcpy(last_result, render_buffer, width * height * sizeof(float));
+
     for (int y = 0; y < height; ++y) {
         rgb* lineptr = (rgb*)(buffer + y * stride);
         for (int x = 0; x < width; ++x) {
-            const uint8_t intensity = std::min(static_cast<int>(render_buffer[y * width + x] * 255.0f), 255);
+            uint8_t intensity = std::min(static_cast<int>(render_buffer[y * width + x] * 255.0f), 255);
 
             //lineptr[x] = pixel_states[y * width + x].rgb_background;
 
-            lineptr[x].r = intensity;
-            lineptr[x].g = 0;
-            lineptr[x].b = 255 - intensity;
+            const rgb pixel = lineptr[x];
+
+            if (intensity == 0) {
+                intensity = pixel.r;
+            }
+
+            lineptr[x].r = (pixel.r + intensity * 2) / 3;
+            lineptr[x].g = pixel.g;
+            lineptr[x].b = pixel.b;
         }
     }
 }
