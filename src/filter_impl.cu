@@ -12,7 +12,7 @@
 #include "logo.h"
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
-#define DISK_RADIUS 3
+#define DISK_RADIUS 4
 #define TILE_WIDTH 16
 #define LOADED_WIDTH (TILE_WIDTH + 2 * (DISK_RADIUS - 1))
 
@@ -79,38 +79,9 @@ __device__ constexpr float inverse_srgb_lut[256] = {
     0.97344529f, 0.98225055f, 0.99110210f, 1.00000000f};
 
 
-__constant__ uint8_t* logo;
-
-/// @brief Black out the red channel from the video and add EPITA's logo
-/// @param buffer 
-/// @param width 
-/// @param height 
-/// @param stride 
-/// @param pixel_stride 
-/// @return 
-__global__ void remove_red_channel_inp(std::byte* buffer, int width, int height, int stride)
-{
-    int y = blockIdx.y * blockDim.y + threadIdx.y; 
-    int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (x >= width || y >= height)
-        return; 
-
-    rgb* lineptr = (rgb*) (buffer + y * stride);
-    if (y < logo_height && x < logo_width) {
-        lineptr[x].r = 255;
-        lineptr[x].g = 0; //uint8_t(alpha * lineptr[x].g + (1-alpha) * 255);
-        lineptr[x].b = 0; //uint8_t(alpha * lineptr[x].b + (1-alpha) * 255);
-    } else {
-        lineptr[x].r = 0;
-    }
-}
-
 constexpr float epsilon = 0.008856f;
 constexpr float kappa = 903.3f;
-
 __device__ inline float lab_f(float t) {
-
     return (t > epsilon) ? std::cbrt(t) : (kappa * t + 16.0f) / 116.0f;
 }
 
@@ -194,8 +165,8 @@ __global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stri
     int da = curr_lab->a - curr_mask->bg.a;
     int db = curr_lab->b - curr_mask->bg.b;
 
-    int tot_dist = dl * dl + da * da + db * db;
-    if (tot_dist >= 25 * 25) { // we do not have a match
+    int tot_dist = sqrtf(dl * dl + da * da + db * db);
+    if (tot_dist >= 25) { // we do not have a match
         if (curr_mask->time == 0) {
             curr_mask->candidate = *curr_lab;
             curr_mask->time += 1;
@@ -382,28 +353,6 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
 
 namespace 
 {
-    void load_logo()
-    {
-        static auto buffer = std::unique_ptr<std::byte, decltype(&cudaFree)>{nullptr, &cudaFree}; 
-
-        if (buffer == nullptr)
-        {
-            cudaError_t err;
-            std::byte* ptr;
-            err = cudaMalloc(&ptr, logo_width * logo_height);
-            CHECK_CUDA_ERROR(err);
-
-            err = cudaMemcpy(ptr, logo_data, logo_width * logo_height, cudaMemcpyHostToDevice);
-            CHECK_CUDA_ERROR(err);
-
-            err = cudaMemcpyToSymbol(logo, &ptr, sizeof(ptr));
-            CHECK_CUDA_ERROR(err);
-
-            buffer.reset(ptr);
-        }
-
-    }
-    // Change global variable declarations to use proper types and initialization
     mask_infos* mask = nullptr;
     size_t mask_pitch = 0;
 }
@@ -412,8 +361,6 @@ namespace
 extern "C" {
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
     {
-
-        load_logo();
 
         assert(sizeof(rgb) == pixel_stride);
         rgb* d_rgb_buffer;
