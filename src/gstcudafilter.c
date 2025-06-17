@@ -37,6 +37,7 @@
 #include <gst/gst.h>
 #include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
+#include <stdio.h>
 #include "gstcudafilter.h"
 #include "filter_impl.h"
 
@@ -109,6 +110,35 @@ gst_cuda_filter_class_init (GstCudaFilterClass * klass)
 
   gobject_class->set_property = gst_cuda_filter_set_property;
   gobject_class->get_property = gst_cuda_filter_get_property;
+
+  g_object_class_install_property(
+    gobject_class, PROP_BG,
+    g_param_spec_string("bg", "Background image URI",
+                         "URI to the background image",
+                         "",  // default value
+                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  
+  g_object_class_install_property(
+    gobject_class, PROP_OPENING_SIZE,
+    g_param_spec_int("opening-size", "Opening size",
+                      "Size of morphological opening",
+                      -2, 1000, -1,  // min, max, default
+                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  
+  g_object_class_install_property(
+    gobject_class, PROP_TH_LOW,
+    g_param_spec_int("th-low", "Threshold low",
+                      "Lower threshold value",
+                      -2, 256, -1,
+                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+  
+  g_object_class_install_property(
+    gobject_class, PROP_TH_HIGH,
+    g_param_spec_int("th-high", "Threshold high",
+                      "Higher threshold value",
+                      -2, 256, -1,
+                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
   gobject_class->dispose = gst_cuda_filter_dispose;
   gobject_class->finalize = gst_cuda_filter_finalize;
   base_transform_class->start = GST_DEBUG_FUNCPTR (gst_cuda_filter_start);
@@ -116,34 +146,6 @@ gst_cuda_filter_class_init (GstCudaFilterClass * klass)
   video_filter_class->set_info = GST_DEBUG_FUNCPTR (gst_cuda_filter_set_info);
   //video_filter_class->transform_frame = GST_DEBUG_FUNCPTR (gst_cuda_filter_transform_frame);
   video_filter_class->transform_frame_ip = GST_DEBUG_FUNCPTR (gst_cuda_filter_transform_frame_ip);
-
-  g_object_class_install_property (
-    gobject_class, PROP_BG,
-    g_param_spec_string ("bg", "Background image URI",
-                         "URI to the background image",
-                         "",  // default value
-                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-  
-  g_object_class_install_property (
-    gobject_class, PROP_OPENING_SIZE,
-    g_param_spec_int ("opening_size", "Opening size",
-                      "Size of morphological opening",
-                      0, 100, 3,  // min, max, default
-                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-  
-  g_object_class_install_property (
-    gobject_class, PROP_TH_LOW,
-    g_param_spec_int ("th_low", "Threshold low",
-                      "Lower threshold value",
-                      0, 255, 3,
-                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
-  
-  g_object_class_install_property (
-    gobject_class, PROP_TH_HIGH,
-    g_param_spec_int ("th_high", "Threshold high",
-                      "Higher threshold value",
-                      0, 255, 30,
-                      G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 
 static void
@@ -158,6 +160,8 @@ gst_cuda_filter_set_property (GObject * object, guint property_id,
   GstCudaFilter *cudafilter = GST_CUDA_FILTER (object);
 
   GST_DEBUG_OBJECT (cudafilter, "set_property");
+
+  printf("%d\n", property_id);
 
   switch (property_id) {
     case PROP_BG:
@@ -187,6 +191,20 @@ gst_cuda_filter_get_property (GObject * object, guint property_id,
   GST_DEBUG_OBJECT (cudafilter, "get_property");
 
   switch (property_id) {
+    case PROP_BG:
+      char ch[200];
+      sprintf(ch, "%8s\n", g_value_dup_string(value));
+      cudafilter->params.bg = ch;
+      break;
+    case PROP_OPENING_SIZE:
+      cudafilter->params.opening_size = g_value_get_int(value);
+      break;
+    case PROP_TH_LOW:
+      cudafilter->params.th_low = g_value_get_int(value);
+      break;
+    case PROP_TH_HIGH:
+      cudafilter->params.th_high = g_value_get_int(value);
+      break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
       break;

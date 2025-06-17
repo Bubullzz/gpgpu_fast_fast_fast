@@ -362,7 +362,6 @@ namespace
 extern "C" {
     void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride, GstFilterParams params)
     {
-
         assert(sizeof(rgb) == pixel_stride);
         rgb* d_rgb_buffer;
         size_t rgb_pitch;
