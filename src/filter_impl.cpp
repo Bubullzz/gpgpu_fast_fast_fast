@@ -9,7 +9,7 @@ struct rgb {
 };
 
 extern "C" {
-    void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride)
+    void filter_impl(uint8_t* buffer, int width, int height, int stride, int pixel_stride, GstFilterParams params)
     {
         for (int y = 0; y < height; ++y)
         {

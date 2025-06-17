@@ -23,6 +23,8 @@
 #include <gst/video/video.h>
 #include <gst/video/gstvideofilter.h>
 
+#include "filter_params.h"
+
 G_BEGIN_DECLS
 
 #define GST_TYPE_CUDA_FILTER   (gst_cuda_filter_get_type())
@@ -38,6 +40,7 @@ struct _GstCudaFilter
 {
   GstVideoFilter base_cudafilter;
 
+  GstFilterParams params;
 };
 
 struct _GstCudaFilterClass

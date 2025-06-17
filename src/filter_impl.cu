@@ -1,4 +1,5 @@
 #include "filter_impl.h"
+#include "filter_params.h"
 
 #include <cassert>
 #include <chrono>
@@ -359,7 +360,7 @@ namespace
 
 
 extern "C" {
-    void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride)
+    void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride, GstFilterParams params)
     {
 
         assert(sizeof(rgb) == pixel_stride);
