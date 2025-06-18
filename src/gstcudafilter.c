@@ -151,6 +151,10 @@ gst_cuda_filter_class_init (GstCudaFilterClass * klass)
 static void
 gst_cuda_filter_init (GstCudaFilter *cudafilter)
 {
+  cudafilter->params.bg = NULL;
+  cudafilter->params.opening_size = -1;
+  cudafilter->params.th_low = -1;
+  cudafilter->params.th_high = -1;
 }
 
 void

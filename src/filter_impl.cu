@@ -399,14 +399,12 @@ extern "C" {
         if (mask == nullptr) {
             // Setting up disk_radius and loaded_width
             h_disk_radius = width / 100;
-            /* ça c casser
-            if (params.opening_size != 0)
+            if (params.opening_size != -1)
             {
                 h_disk_radius = params.opening_size;
-            }*/
-            std::cout << std::endl<< std::endl<< std::endl<< std::endl;
-            std::cout << h_disk_radius;
+            }
             cudaMemcpyToSymbol(d_disk_radius, &h_disk_radius, sizeof(int));
+
             h_loaded_width = TILE_WIDTH + 2 * h_disk_radius;
             cudaMemcpyToSymbol(d_loaded_width, &h_loaded_width, sizeof(int));
 

@@ -515,8 +515,14 @@ extern "C" void filter_impl(uint8_t* buffer, int width, int height, int stride, 
     // seed(buffer_2, buffer_3, buffer_1, width, height, width);
     // render_buffer = buffer_1;
 
-    erode(buffer_1, buffer_2, 3, width, height, width);
-    dilate(buffer_2, buffer_1, 3, width, height, width);
+    int disk_radius = width / 100;
+    if (params.opening_size != -1)
+    {
+        disk_radius = params.opening_size;
+    }
+
+    erode(buffer_1, buffer_2, disk_radius, width, height, width);
+    dilate(buffer_2, buffer_1, disk_radius, width, height, width);
     hysteresis(buffer_1, buffer_2, width, height, width, 4.0f, 30.0f);
     render_buffer = buffer_2;
 
