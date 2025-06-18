@@ -27,6 +27,9 @@
 
 G_BEGIN_DECLS
 
+#define GST_PLUGIN_NAME cudafilter
+#define GST_PIPELINE_ELEMENT_NAME "cudafilter"
+
 #define GST_TYPE_CUDA_FILTER   (gst_cuda_filter_get_type())
 #define GST_CUDA_FILTER(obj)   (G_TYPE_CHECK_INSTANCE_CAST((obj),GST_TYPE_CUDA_FILTER,GstCudaFilter))
 #define GST_CUDA_FILTER_CLASS(klass)   (G_TYPE_CHECK_CLASS_CAST((klass),GST_TYPE_CUDA_FILTER,GstCudaFilterClass))

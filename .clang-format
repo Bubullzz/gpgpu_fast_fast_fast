@@ -1,0 +1,13 @@
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+UseTab: Never
+Cpp11BracedListStyle: true
+AlwaysBreakAfterReturnType: None
+AlwaysBreakAfterDefinitionReturnType: None
+AllowShortLambdasOnASingleLine: Empty
+AllowShortFunctionsOnASingleLine: Empty
+PointerAlignment: Left
+BreakBeforeBraces: Attach
+ColumnLimit: 120
+Standard: "c++20"
