@@ -43,9 +43,6 @@ struct lab {
 struct mask_infos {
     lab bg;
     lab candidate;
-    unsigned long output;
-    unsigned long erosion;
-    bool hysteresis = false;
     unsigned long time;
 };
 
@@ -53,6 +50,19 @@ __constant__ int d_disk_radius;
 __constant__ int d_loaded_width;
 int h_disk_radius;
 int h_loaded_width;
+
+bool first_frame = true;
+mask_infos* mask;
+uint8_t* mask_output;
+uint8_t* erosion_output;
+uint8_t* dilatation_output;
+bool* hysteresis_output;
+
+size_t mask_pitch = 0;
+size_t mask_output_pitch = 0;
+size_t erosion_output_pitch = 0;
+size_t dilatation_output_pitch = 0;
+size_t hysteresis_output_pitch = 0;
 
 __device__ constexpr float inverse_srgb_lut[256] = {
     0.00000000f, 0.00030353f, 0.00060705f, 0.00091058f, 0.00121411f, 0.00151763f, 0.00182116f, 0.00212469f, 0.00242822f,
@@ -93,7 +103,7 @@ __device__ inline float lab_f(float t) {
 }
 
 
-__global__ void rgb_to_lab(rgb* rgb_buff, lab* lab_buff, int width, int height, int rgb_stride, int lab_stride)
+__global__ void rgb_to_lab(rgb* rgb_buff, lab* lab_buff, int width, int height, int rgb_pitch, int lab_pitch)
 {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -101,8 +111,8 @@ __global__ void rgb_to_lab(rgb* rgb_buff, lab* lab_buff, int width, int height, 
     if (x >= width || y >= height)
         return;
 
-    rgb* rgb_col = &((rgb*)((std::byte*)rgb_buff + y * rgb_stride))[x];
-    lab* lab_col = &((lab*)((std::byte*)lab_buff + y * lab_stride))[x];
+    rgb* rgb_col = &((rgb*)((std::byte*)rgb_buff + y * rgb_pitch))[x];
+    lab* lab_col = &((lab*)((std::byte*)lab_buff + y * lab_pitch))[x];
     float a = inverse_srgb_lut[rgb_col->r];
     float b = inverse_srgb_lut[rgb_col->g];
     float c = inverse_srgb_lut[rgb_col->b];
@@ -131,32 +141,31 @@ __global__ void rgb_to_lab(rgb* rgb_buff, lab* lab_buff, int width, int height, 
     lab_col->a = A;
     lab_col->b = B;
 }
-__global__ void setup_mask_first_frame(lab* first_frame, mask_infos* mask, int first_frame_stride, int mask_stride, int width, int height) {
+__global__ void setup_mask_first_frame(lab* first_frame, mask_infos* mask, int first_frame_pitch, int mask_pitch, int width, int height) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (x >= width || y >= height)
         return;
 
-    lab* curr_lab = &((lab*)((std::byte*)first_frame + y * first_frame_stride))[x];
-    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    lab* curr_lab = &((lab*)((std::byte*)first_frame + y * first_frame_pitch))[x];
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_pitch))[x];
 
     curr_mask->bg = *curr_lab;
     curr_mask->candidate = *curr_lab;
     curr_mask->time = 0;
-    curr_mask->output = 0;
 }
 
-__global__ void reset_hysteresis(mask_infos* mask, int mask_stride, int width, int height) {
+__global__ void reset_hysteresis(bool* hysteresis_buffer, int hysteresis_pitch, int width, int height) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     if (x >= width || y >= height)
         return;
-    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
-    curr_mask->hysteresis = false;
+    bool* curr_hyst = &((bool*)((std::byte*)hysteresis_buffer + y * hysteresis_pitch))[x];
+    *curr_hyst = false;
 }
 
-__global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stride, int mask_stride, int width, int height) {
+__global__ void update_mask(lab* lab_frame, mask_infos* mask, uint8_t* mask_output, int lab_frame_pitch, size_t mask_pitch, size_t mask_output_pitch, int width, int height) {
     int GHOSTING = 50;
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -165,8 +174,8 @@ __global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stri
     if (x >= width || y >= height)
         return;
 
-    lab* curr_lab = &((lab*)((std::byte*)lab_frame + y * lab_frame_stride))[x];
-    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
+    lab* curr_lab = &((lab*)((std::byte*)lab_frame + y * lab_frame_pitch))[x];
+    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_pitch))[x];
 
     int dl = curr_lab->l - curr_mask->bg.l;
     int da = curr_lab->a - curr_mask->bg.a;
@@ -204,26 +213,26 @@ __global__ void update_mask(lab* lab_frame, mask_infos* mask, int lab_frame_stri
         curr_mask->bg.b += curr_lab->b / 2;
         curr_mask->time = 0;
     }
-
-    curr_mask->output = tot_dist;
+    uint8_t* curr_output = &((uint8_t*)((std::byte*)mask_output + y * mask_output_pitch))[x];
+    *curr_output = tot_dist;
 }
 
-__global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int mask_stride, int width, int height) {
+__global__ void display_mask(rgb* buff, bool* hysteresis_output, int buff_pitch, size_t hysteresis_output_pitch, int width, int height) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     if (x >= width || y >= height)
         return;
 
-    rgb* curr_rgb = &((rgb*)((std::byte*)buff + y * buff_stride))[x];
-    mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
-    if (curr_mask->hysteresis) {
+    rgb* curr_rgb = &((rgb*)((std::byte*)buff + y * buff_pitch))[x];
+    bool* curr_hyst= &((bool*)((std::byte*)hysteresis_output + y * hysteresis_output_pitch))[x];
+    if (*curr_hyst) {
         curr_rgb->r = (int)curr_rgb->r + 128 > 255 ? 255 : curr_rgb->r + 128;
     }
 }
 
-__global__ void erosion(mask_infos* mask, int mask_stride, int width, int height) {
-    extern __shared__ unsigned long s_distances_erosion[];
+__global__ void erosion(uint8_t* mask_output, uint8_t* erosion_output, size_t mask_output_pitch, size_t erosion_output_pitch, int width, int height) {
+    extern __shared__ uint8_t s_distances_erosion[];
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -240,10 +249,10 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
         int pos_y = block_y - d_disk_radius + dest_y;
         int pos_x = block_x - d_disk_radius + dest_x;
         if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height)
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = 10000;
+            s_distances_erosion[dest_y * d_loaded_width + dest_x] = 255;
         else {
-            mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = curr_mask->output;
+            uint8_t* curr_mask = &((uint8_t*)((std::byte*)mask_output + pos_y * mask_output_pitch))[pos_x];
+            s_distances_erosion[dest_y * d_loaded_width + dest_x] = *curr_mask;
         }
     }
     __syncthreads();
@@ -252,13 +261,13 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
         return;
 
     // EROSION
-    unsigned long min = 10000;
+    uint8_t min = 255;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             int sy = threadIdx.y + j + d_disk_radius;
             int sx = threadIdx.x + i + d_disk_radius;
-            unsigned long curr = s_distances_erosion[sy * d_loaded_width + sx];
+            uint8_t curr = s_distances_erosion[sy * d_loaded_width + sx];
             if (curr < min)
                 min = curr;
         }
@@ -266,12 +275,12 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
 
     __syncthreads();
 
-    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
-    curr_mask->erosion = min;
+    uint8_t* curr_erosion = &((uint8_t*)((std::byte*)erosion_output + y * erosion_output_pitch))[x];
+    *curr_erosion = min;
 }
 
-__global__ void dilatation(mask_infos* mask, int mask_stride, int width, int height) {
-    extern __shared__ unsigned long s_distances_dilatation[];
+__global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, size_t erosion_output_pitch, size_t dilatation_output_pitch, int width, int height) {
+    extern __shared__ uint8_t s_distances_dilatation[];
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
@@ -291,8 +300,8 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
             s_distances_dilatation[dest_y * d_loaded_width + dest_x] = 0;
             continue; // On the border
         }
-        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-        s_distances_dilatation[dest_y * d_loaded_width + dest_x] = curr_mask->erosion;
+        uint8_t* curr_erosion = &((uint8_t*)((std::byte*)erosion_output + pos_y * erosion_output_pitch))[pos_x];
+        s_distances_dilatation[dest_y * d_loaded_width + dest_x] = *curr_erosion;
     }
     __syncthreads();
 
@@ -300,23 +309,22 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     return;
 
     // DILATATION
-    unsigned long max = 0;
+    uint8_t max = 0;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             int sy = threadIdx.y + j + d_disk_radius;
             int sx = threadIdx.x + i + d_disk_radius;
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            unsigned long curr = s_distances_dilatation[sy * d_loaded_width + sx];
+            uint8_t curr = s_distances_dilatation[sy * d_loaded_width + sx];
             max = curr > max ? curr : max;
         }
     }
-
-    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
-    curr_mask->output = max;
+    uint8_t* curr_dilatation_output = &((uint8_t*)((std::byte*)dilatation_output + y * dilatation_output_pitch))[x];
+    *curr_dilatation_output = max;
 }
 
-__global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int height, bool* changed) {
+__global__ void hysteresis(uint8_t* dilatation_output, bool* hysteresis_output, size_t dilatation_output_pitch, size_t hysteresis_output_pitch, int width, int height, bool* changed) {
     extern __shared__ bool s_hysteresis[];
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
@@ -337,8 +345,9 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
             s_hysteresis[dest_y * d_loaded_width + dest_x] = false;
             continue; // On the border
         }
-        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-        s_hysteresis[dest_y * d_loaded_width + dest_x] = curr_mask->hysteresis;
+        bool* curr_hysteresis_output= &((bool*)((std::byte*)hysteresis_output + pos_y * hysteresis_output_pitch))[pos_x];
+
+        s_hysteresis[dest_y * d_loaded_width + dest_x] = *curr_hysteresis_output;
     }
     __syncthreads();
 
@@ -346,12 +355,13 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
         return;
 
     // HYSTERESIS
-    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
-    if (curr_mask->hysteresis || curr_mask->output < HYTERESIS_LOW) // Already computed or under thershold
+    uint8_t* curr_dilatation_output = &((uint8_t*)((std::byte*)dilatation_output + y * dilatation_output_pitch))[x];
+    bool* curr_hysteresis_output= &((bool*)((std::byte*)hysteresis_output + y * hysteresis_output_pitch))[x];
+    if (*curr_hysteresis_output || *curr_dilatation_output < HYTERESIS_LOW) // Already computed or under thershold
         return;
 
-    if (curr_mask->output > HYTERESIS_HIGH) {
-        curr_mask->hysteresis = true;
+    if (*curr_dilatation_output > HYTERESIS_HIGH) {
+        *curr_hysteresis_output = true;
         *changed = true;
     }
     // Computing doubt values
@@ -359,22 +369,16 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             if (s_hysteresis[(threadIdx.y + j + d_disk_radius) * d_loaded_width + (threadIdx.x + i + d_disk_radius)]) {
-                curr_mask->hysteresis = true;
+                *curr_hysteresis_output = true;
                 *changed = true;
             }
         }
     }
 }
 
-namespace 
-{
-    mask_infos* mask = nullptr;
-    size_t mask_pitch = 0;
-}
-
 
 extern "C" {
-    void filter_impl(uint8_t* src_buffer, int width, int height, int src_stride, int pixel_stride, GstFilterParams params)
+    void filter_impl(uint8_t* src_buffer, int width, int height, int src_pitch, int pixel_stride, GstFilterParams params)
     {
         assert(sizeof(rgb) == pixel_stride);
         rgb* d_rgb_buffer;
@@ -387,7 +391,7 @@ extern "C" {
         
         err = cudaMallocPitch(&d_rgb_buffer, &rgb_pitch, width * sizeof(rgb), height);
         CHECK_CUDA_ERROR(err);
-        err = cudaMemcpy2D(d_rgb_buffer, rgb_pitch, src_buffer, src_stride, width * sizeof(rgb), height, cudaMemcpyHostToDevice);
+        err = cudaMemcpy2D(d_rgb_buffer, rgb_pitch, src_buffer, src_pitch, width * sizeof(rgb), height, cudaMemcpyHostToDevice);
         CHECK_CUDA_ERROR(err);
 
         err = cudaMallocPitch(&d_lab_buffer, &lab_pitch, width * sizeof(lab), height);
@@ -403,7 +407,9 @@ extern "C" {
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
-        if (mask == nullptr) {
+        if (first_frame) {
+            first_frame = false;
+
             // Setting up disk_radius and loaded_width
             h_disk_radius = width / 100;
             if (params.opening_size != -1)
@@ -417,42 +423,50 @@ extern "C" {
 
             err = cudaMallocPitch(&mask, &mask_pitch, width * sizeof(mask_infos), height);
             CHECK_CUDA_ERROR(err);
+            err = cudaMallocPitch(&mask_output, &mask_output_pitch, width * sizeof(uint8_t), height);
+            CHECK_CUDA_ERROR(err);
+            err = cudaMallocPitch(&erosion_output, &erosion_output_pitch, width * sizeof(uint8_t), height);
+            CHECK_CUDA_ERROR(err);
+            err = cudaMallocPitch(&dilatation_output, &dilatation_output_pitch, width * sizeof(uint8_t), height);
+            CHECK_CUDA_ERROR(err);
+            err = cudaMallocPitch(&hysteresis_output, &hysteresis_output_pitch, width * sizeof(bool), height);
+            CHECK_CUDA_ERROR(err);
             setup_mask_first_frame<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
             cudaDeviceSynchronize();
             err = cudaGetLastError(); // Get launch error
             CHECK_CUDA_ERROR(err);
         }
         nvtxRangePushA("reset_hysteresis");
-        reset_hysteresis<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
+        reset_hysteresis<<<gridSize, blockSize>>>(hysteresis_output, hysteresis_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
 
         nvtxRangePushA("update_mask");
-        update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
+        update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, mask_output, lab_pitch, mask_pitch, mask_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
         nvtxRangePush("erosion");
-        erosion<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
+        erosion<<<gridSize, blockSize, sizeof(uint8_t) * h_loaded_width * h_loaded_width>>>(mask_output, erosion_output, mask_output_pitch, erosion_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
 
         nvtxRangePush("dilatation");
-        dilatation<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
+        dilatation<<<gridSize, blockSize, sizeof(uint8_t) * h_loaded_width * h_loaded_width>>>(erosion_output, dilatation_output, erosion_output_pitch, dilatation_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
-        bool h_change = true;
+        bool h_change = false;
         bool* d_change;
         cudaMalloc(&d_change, sizeof(bool));
         while (h_change) {
             cudaMemset(d_change, false, sizeof(bool));
             nvtxRangePush("hysteresis");
-            hysteresis<<<gridSize, blockSize, h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height, d_change);
+            hysteresis<<<gridSize, blockSize, h_loaded_width * h_loaded_width>>>(dilatation_output, hysteresis_output, dilatation_output_pitch, hysteresis_output_pitch, width, height, d_change);
             cudaDeviceSynchronize();
             nvtxRangePop();
             CHECK_CUDA_ERROR(cudaGetLastError());
@@ -460,7 +474,7 @@ extern "C" {
         }
 
         nvtxRangePush("display_mask");
-        display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, mask, rgb_pitch, mask_pitch, width, height);
+        display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, hysteresis_output, rgb_pitch, hysteresis_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
@@ -469,7 +483,7 @@ extern "C" {
         // Final Copy
         err = cudaDeviceSynchronize();
         CHECK_CUDA_ERROR(err);
-        err = cudaMemcpy2D(src_buffer, src_stride, d_rgb_buffer, rgb_pitch, width * sizeof(rgb), height, cudaMemcpyDeviceToHost);
+        err = cudaMemcpy2D(src_buffer, src_pitch, d_rgb_buffer, rgb_pitch, width * sizeof(rgb), height, cudaMemcpyDeviceToHost);
         CHECK_CUDA_ERROR(err);
 
         cudaFree(d_rgb_buffer);
