@@ -10,11 +10,12 @@
 #include <c++/13/functional>
 #include <c++/13/functional>
 #include <c++/13/bits/algorithmfwd.h>
+#include <nvToolsExt.h>
 
 #include "logo.h"
 
 #define CHECK_CUDA_ERROR(val) check((val), #val, __FILE__, __LINE__)
-#define TILE_WIDTH 32
+#define TILE_WIDTH 16
 
 #define HYTERESIS_HIGH 30
 #define HYTERESIS_LOW 4
@@ -275,9 +276,6 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
-    if (x >= width || y >= height)
-        return;
-
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
 
@@ -298,12 +296,18 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     }
     __syncthreads();
 
+    if (x >= width || y >= height)
+    return;
+
     // DILATATION
     unsigned long max = 0;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            unsigned long curr = s_distances_dilatation[(threadIdx.y + j + d_disk_radius) * d_loaded_width + (threadIdx.x + i + d_disk_radius)];
+            int sy = threadIdx.y + j + d_disk_radius;
+            int sx = threadIdx.x + i + d_disk_radius;
+            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
+            unsigned long curr = s_distances_dilatation[sy * d_loaded_width + sx];
             max = curr > max ? curr : max;
         }
     }
@@ -317,9 +321,6 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
 
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (x >= width || y >= height)
-        return;
 
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
@@ -341,6 +342,9 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
     }
     __syncthreads();
 
+    if (x >= width || y >= height)
+        return;
+
     // HYSTERESIS
     mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
     if (curr_mask->hysteresis || curr_mask->output < HYTERESIS_LOW) // Already computed or under thershold
@@ -353,6 +357,7 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
     // Computing doubt values
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
+            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             if (s_hysteresis[(threadIdx.y + j + d_disk_radius) * d_loaded_width + (threadIdx.x + i + d_disk_radius)]) {
                 curr_mask->hysteresis = true;
                 *changed = true;
@@ -391,8 +396,10 @@ extern "C" {
         dim3 blockSize(TILE_WIDTH,TILE_WIDTH);
         dim3 gridSize((width + (blockSize.x - 1)) / blockSize.x, (height + (blockSize.y - 1)) / blockSize.y);
 
+        nvtxRangePushA("rgb_to_lab");
         rgb_to_lab<<<gridSize, blockSize>>>(d_rgb_buffer, d_lab_buffer, width, height, rgb_pitch, lab_pitch);
         cudaDeviceSynchronize();
+        nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
@@ -415,18 +422,27 @@ extern "C" {
             err = cudaGetLastError(); // Get launch error
             CHECK_CUDA_ERROR(err);
         }
+        nvtxRangePushA("reset_hysteresis");
         reset_hysteresis<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
         cudaDeviceSynchronize();
+        nvtxRangePop();
 
+        nvtxRangePushA("update_mask");
         update_mask<<<gridSize, blockSize>>>(d_lab_buffer, mask, lab_pitch, mask_pitch, width, height);
         cudaDeviceSynchronize();
+        nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
+        nvtxRangePush("erosion");
         erosion<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
         cudaDeviceSynchronize();
+        nvtxRangePop();
+
+        nvtxRangePush("dilatation");
         dilatation<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
         cudaDeviceSynchronize();
+        nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
@@ -435,14 +451,18 @@ extern "C" {
         cudaMalloc(&d_change, sizeof(bool));
         while (h_change) {
             cudaMemset(d_change, false, sizeof(bool));
+            nvtxRangePush("hysteresis");
             hysteresis<<<gridSize, blockSize, h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height, d_change);
             cudaDeviceSynchronize();
+            nvtxRangePop();
             CHECK_CUDA_ERROR(cudaGetLastError());
             cudaMemcpy(&h_change, d_change, sizeof(bool), cudaMemcpyDeviceToHost);
         }
 
+        nvtxRangePush("display_mask");
         display_mask<<<gridSize, blockSize>>>(d_rgb_buffer, mask, rgb_pitch, mask_pitch, width, height);
         cudaDeviceSynchronize();
+        nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
@@ -458,5 +478,5 @@ extern "C" {
             using namespace std::chrono_literals;
             //std::this_thread::sleep_for(100ms);
         }
-    }   
+    }
 }
