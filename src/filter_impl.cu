@@ -238,9 +238,9 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            int sy = threadIdx.y + j + d_disk_radius;
-            int sx = threadIdx.x + i + d_disk_radius;
-            if (sx < 0 || sy < o || sx > width || sy > height) continue;
+            int sy = y + i;// + d_disk_radius;
+            int sx = x + j;// + d_disk_radius;
+            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
             mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
             unsigned long curr = curr_mask->output;
             if (curr < min)
@@ -250,6 +250,7 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
 
     __syncthreads();
 
+    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
     curr_mask->erosion = min;
 }
 
@@ -262,8 +263,6 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
 
-    __syncthreads();
-
     if (x >= width || y >= height)
     return;
 
@@ -271,15 +270,18 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     unsigned long max = 0;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
-            int sy = threadIdx.y + j + d_disk_radius;
-            int sx = threadIdx.x + i + d_disk_radius;
-            if (sx < 0 || sy < o || sx > width || sy > height) continue;
+            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
+            int sy = y + i;// + d_disk_radius;
+            int sx = x + j;// + d_disk_radius;
+            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
             mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
             unsigned long curr = curr_mask->erosion;
             if (curr > max)
                 max = curr;
         }
     }
+
+    __syncthreads();
 
     mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
     curr_mask->output = max;
@@ -309,9 +311,10 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
     // Computing doubt values
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
-            if (sx < 0 || sy < o || sx > width || sy > height) continue;
-            int sy = threadIdx.y + j + d_disk_radius;
-            int sx = threadIdx.x + i + d_disk_radius;
+            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
+            int sy = y + i;// + d_disk_radius;
+            int sx = x + j;// + d_disk_radius;
+            if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
             mask_infos* tmp_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
             if (tmp_mask->hysteresis) {
                 curr_mask->hysteresis = true;
