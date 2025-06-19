@@ -460,7 +460,7 @@ extern "C" {
         err = cudaGetLastError(); // Get launch error
         CHECK_CUDA_ERROR(err);
 
-        bool h_change = false;
+        bool h_change = true;
         bool* d_change;
         cudaMalloc(&d_change, sizeof(bool));
         while (h_change) {
