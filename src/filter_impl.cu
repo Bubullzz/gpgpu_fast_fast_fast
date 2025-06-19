@@ -232,30 +232,8 @@ __global__ void display_mask(rgb* buff, bool* hysteresis_output, int buff_pitch,
 }
 
 __global__ void erosion(uint8_t* mask_output, uint8_t* erosion_output, size_t mask_output_pitch, size_t erosion_output_pitch, int width, int height) {
-    extern __shared__ uint8_t s_distances_erosion[];
-
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int block_y = blockIdx.y * blockDim.y;
-    int block_x = blockIdx.x * blockDim.x;
-
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height)
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = 255;
-        else {
-            uint8_t* curr_mask = &((uint8_t*)((std::byte*)mask_output + pos_y * mask_output_pitch))[pos_x];
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = *curr_mask;
-        }
-    }
-    __syncthreads();
 
     if (x >= width || y >= height)
         return;
@@ -265,9 +243,10 @@ __global__ void erosion(uint8_t* mask_output, uint8_t* erosion_output, size_t ma
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            int sy = threadIdx.y + j + d_disk_radius;
-            int sx = threadIdx.x + i + d_disk_radius;
-            uint8_t curr = s_distances_erosion[sy * d_loaded_width + sx];
+            int c_x = x + i;
+            int c_y = y + j;
+            if (c_x < 0 || c_y < 0 || c_x > width || c_y > height) continue; // Out of bounds
+            uint8_t curr = ((uint8_t*)((std::byte*)mask_output + c_y * mask_output_pitch))[c_x];
             if (curr < min)
                 min = curr;
         }
@@ -280,30 +259,8 @@ __global__ void erosion(uint8_t* mask_output, uint8_t* erosion_output, size_t ma
 }
 
 __global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, size_t erosion_output_pitch, size_t dilatation_output_pitch, int width, int height) {
-    extern __shared__ uint8_t s_distances_dilatation[];
-
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int block_y = blockIdx.y * blockDim.y;
-    int block_x = blockIdx.x * blockDim.x;
-
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
-            s_distances_dilatation[dest_y * d_loaded_width + dest_x] = 0;
-            continue; // On the border
-        }
-        uint8_t* curr_erosion = &((uint8_t*)((std::byte*)erosion_output + pos_y * erosion_output_pitch))[pos_x];
-        s_distances_dilatation[dest_y * d_loaded_width + dest_x] = *curr_erosion;
-    }
-    __syncthreads();
 
     if (x >= width || y >= height)
     return;
@@ -313,11 +270,12 @@ __global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, 
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            int sy = threadIdx.y + j + d_disk_radius;
-            int sx = threadIdx.x + i + d_disk_radius;
-            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            uint8_t curr = s_distances_dilatation[sy * d_loaded_width + sx];
-            max = curr > max ? curr : max;
+            int c_x = x + i;
+            int c_y = y + j;
+            if (c_x < 0 || c_y < 0 || c_x > width || c_y > height) continue; // Out of bounds
+            uint8_t curr = ((uint8_t*)((std::byte*)mask_output + c_y * erosion_output_pitch))[c_x];
+            if (curr > max)
+                min = curr;
         }
     }
     uint8_t* curr_dilatation_output = &((uint8_t*)((std::byte*)dilatation_output + y * dilatation_output_pitch))[x];
@@ -325,31 +283,11 @@ __global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, 
 }
 
 __global__ void hysteresis(uint8_t* dilatation_output, bool* hysteresis_output, size_t dilatation_output_pitch, size_t hysteresis_output_pitch, int width, int height, bool* changed) {
-    extern __shared__ bool s_hysteresis[];
-
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
-
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
-            s_hysteresis[dest_y * d_loaded_width + dest_x] = false;
-            continue; // On the border
-        }
-        bool* curr_hysteresis_output= &((bool*)((std::byte*)hysteresis_output + pos_y * hysteresis_output_pitch))[pos_x];
-
-        s_hysteresis[dest_y * d_loaded_width + dest_x] = *curr_hysteresis_output;
-    }
-    __syncthreads();
 
     if (x >= width || y >= height)
         return;
@@ -368,9 +306,15 @@ __global__ void hysteresis(uint8_t* dilatation_output, bool* hysteresis_output, 
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            if (s_hysteresis[(threadIdx.y + j + d_disk_radius) * d_loaded_width + (threadIdx.x + i + d_disk_radius)]) {
+            int c_x = x + i;
+            int c_y = y + j;
+            if (c_x < 0 || c_y < 0 || c_x > width || c_y > height) continue; // Out of bounds
+            bool curr = ((bool*)((std::byte*)dilatation_output + c_y * dilatation_output_pitch))[c_x];
+
+            if (curr) {
                 *curr_hysteresis_output = true;
                 *changed = true;
+                return;
             }
         }
     }
@@ -449,12 +393,12 @@ extern "C" {
         CHECK_CUDA_ERROR(err);
 
         nvtxRangePush("erosion");
-        erosion<<<gridSize, blockSize, sizeof(uint8_t) * h_loaded_width * h_loaded_width>>>(mask_output, erosion_output, mask_output_pitch, erosion_output_pitch, width, height);
+        erosion<<<gridSize, blockSize>>>(mask_output, erosion_output, mask_output_pitch, erosion_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
 
         nvtxRangePush("dilatation");
-        dilatation<<<gridSize, blockSize, sizeof(uint8_t) * h_loaded_width * h_loaded_width>>>(erosion_output, dilatation_output, erosion_output_pitch, dilatation_output_pitch, width, height);
+        dilatation<<<gridSize, blockSize>>>(erosion_output, dilatation_output, erosion_output_pitch, dilatation_output_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
@@ -466,7 +410,7 @@ extern "C" {
         while (h_change) {
             cudaMemset(d_change, false, sizeof(bool));
             nvtxRangePush("hysteresis");
-            hysteresis<<<gridSize, blockSize, h_loaded_width * h_loaded_width>>>(dilatation_output, hysteresis_output, dilatation_output_pitch, hysteresis_output_pitch, width, height, d_change);
+            hysteresis<<<gridSize, blockSize>>>(dilatation_output, hysteresis_output, dilatation_output_pitch, hysteresis_output_pitch, width, height, d_change);
             cudaDeviceSynchronize();
             nvtxRangePop();
             CHECK_CUDA_ERROR(cudaGetLastError());
