@@ -223,34 +223,16 @@ __global__ void display_mask(rgb* buff, mask_infos* mask, int buff_stride, int m
 }
 
 __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height) {
-    extern __shared__ unsigned long s_distances_erosion[];
-
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
 
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
 
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height)
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = 10000;
-        else {
-            mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-            s_distances_erosion[dest_y * d_loaded_width + dest_x] = curr_mask->output;
-        }
-    }
-    __syncthreads();
-
     if (x >= width || y >= height)
         return;
 
+    
     // EROSION
     unsigned long min = 10000;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
@@ -258,7 +240,9 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
             if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             int sy = threadIdx.y + j + d_disk_radius;
             int sx = threadIdx.x + i + d_disk_radius;
-            unsigned long curr = s_distances_erosion[sy * d_loaded_width + sx];
+            if (sx < 0 || sy < o || sx > width || sy > height) continue;
+            mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
+            unsigned long curr = curr_mask->output;
             if (curr < min)
                 min = curr;
         }
@@ -266,7 +250,6 @@ __global__ void erosion(mask_infos* mask, int mask_stride, int width, int height
 
     __syncthreads();
 
-    mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + y * mask_stride))[x];
     curr_mask->erosion = min;
 }
 
@@ -279,21 +262,6 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
 
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
-            s_distances_dilatation[dest_y * d_loaded_width + dest_x] = 0;
-            continue; // On the border
-        }
-        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-        s_distances_dilatation[dest_y * d_loaded_width + dest_x] = curr_mask->erosion;
-    }
     __syncthreads();
 
     if (x >= width || y >= height)
@@ -303,12 +271,13 @@ __global__ void dilatation(mask_infos* mask, int mask_stride, int width, int hei
     unsigned long max = 0;
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
-            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
             int sy = threadIdx.y + j + d_disk_radius;
             int sx = threadIdx.x + i + d_disk_radius;
-            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            unsigned long curr = s_distances_dilatation[sy * d_loaded_width + sx];
-            max = curr > max ? curr : max;
+            if (sx < 0 || sy < o || sx > width || sy > height) continue;
+            mask_infos* curr_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
+            unsigned long curr = curr_mask->erosion;
+            if (curr > max)
+                max = curr;
         }
     }
 
@@ -325,23 +294,6 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
     int block_y = blockIdx.y * blockDim.y;
     int block_x = blockIdx.x * blockDim.x;
 
-    // LOADING SHARED MEMORY
-    int src = threadIdx.y * blockDim.x + threadIdx.x;
-    while (src < d_loaded_width * d_loaded_width) {
-        int dest_y = src / d_loaded_width;
-        int dest_x = src % d_loaded_width;
-        src += blockDim.y * blockDim.x;
-        int pos_y = block_y - d_disk_radius + dest_y;
-        int pos_x = block_x - d_disk_radius + dest_x;
-        if (pos_x < 0 || pos_y < 0 || pos_x >= width || pos_y >= height) {
-            s_hysteresis[dest_y * d_loaded_width + dest_x] = false;
-            continue; // On the border
-        }
-        mask_infos* curr_mask= &((mask_infos*)((std::byte*)mask + pos_y * mask_stride))[pos_x];
-        s_hysteresis[dest_y * d_loaded_width + dest_x] = curr_mask->hysteresis;
-    }
-    __syncthreads();
-
     if (x >= width || y >= height)
         return;
 
@@ -357,8 +309,11 @@ __global__ void hysteresis(mask_infos* mask, int mask_stride, int width, int hei
     // Computing doubt values
     for (int i = -d_disk_radius; i <= d_disk_radius; i++) {
         for (int j = -d_disk_radius; j <= d_disk_radius; j++) {
-            if (i*i + j*j > d_disk_radius * d_disk_radius) continue;
-            if (s_hysteresis[(threadIdx.y + j + d_disk_radius) * d_loaded_width + (threadIdx.x + i + d_disk_radius)]) {
+            if (sx < 0 || sy < o || sx > width || sy > height) continue;
+            int sy = threadIdx.y + j + d_disk_radius;
+            int sx = threadIdx.x + i + d_disk_radius;
+            mask_infos* tmp_mask = &((mask_infos*)((std::byte*)mask + sy * mask_stride))[sx];
+            if (tmp_mask->hysteresis) {
                 curr_mask->hysteresis = true;
                 *changed = true;
             }
@@ -435,12 +390,12 @@ extern "C" {
         CHECK_CUDA_ERROR(err);
 
         nvtxRangePush("erosion");
-        erosion<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
+        erosion<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
 
         nvtxRangePush("dilatation");
-        dilatation<<<gridSize, blockSize, sizeof(unsigned long) * h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height);
+        dilatation<<<gridSize, blockSize>>>(mask, mask_pitch, width, height);
         cudaDeviceSynchronize();
         nvtxRangePop();
         err = cudaGetLastError(); // Get launch error
@@ -452,7 +407,7 @@ extern "C" {
         while (h_change) {
             cudaMemset(d_change, false, sizeof(bool));
             nvtxRangePush("hysteresis");
-            hysteresis<<<gridSize, blockSize, h_loaded_width * h_loaded_width>>>(mask, mask_pitch, width, height, d_change);
+            hysteresis<<<gridSize, blockSize>>>(mask, mask_pitch, width, height, d_change);
             cudaDeviceSynchronize();
             nvtxRangePop();
             CHECK_CUDA_ERROR(cudaGetLastError());
