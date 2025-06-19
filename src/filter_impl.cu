@@ -273,9 +273,9 @@ __global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, 
             int c_x = x + i;
             int c_y = y + j;
             if (c_x < 0 || c_y < 0 || c_x > width || c_y > height) continue; // Out of bounds
-            uint8_t curr = ((uint8_t*)((std::byte*)mask_output + c_y * erosion_output_pitch))[c_x];
+            uint8_t curr = ((uint8_t*)((std::byte*)erosion_output + c_y * erosion_output_pitch))[c_x];
             if (curr > max)
-                min = curr;
+                max = curr;
         }
     }
     uint8_t* curr_dilatation_output = &((uint8_t*)((std::byte*)dilatation_output + y * dilatation_output_pitch))[x];
@@ -285,9 +285,6 @@ __global__ void dilatation(uint8_t* erosion_output, uint8_t* dilatation_output, 
 __global__ void hysteresis(uint8_t* dilatation_output, bool* hysteresis_output, size_t dilatation_output_pitch, size_t hysteresis_output_pitch, int width, int height, bool* changed) {
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     int x = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int block_y = blockIdx.y * blockDim.y;
-    int block_x = blockIdx.x * blockDim.x;
 
     if (x >= width || y >= height)
         return;
